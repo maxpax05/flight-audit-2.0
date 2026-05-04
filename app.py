@@ -8,14 +8,13 @@ import plotly.express as px
 IMAP_SERVER = "imap.mail.yahoo.com"
 
 SENDER = "gpnet@xmedia.airfrance.fr"
-SUBJECT_KEY = "Confirmation"
 
-st.set_page_config(page_title="Pilot Dashboard 3.2", layout="wide")
+st.set_page_config(page_title="Pilot Dashboard 3.3", layout="wide")
 
-st.title("✈️ Pilot Dashboard 3.2")
+st.title("✈️ Pilot Dashboard 3.3")
 
 # ---------------- INPUT ----------------
-passenger_name = st.text_input("Nom du passager")
+passenger_name = st.text_input("Nom du passager (ex: PIOT EYRAUD MAXENCE)")
 
 email_user = st.text_input("Yahoo email")
 email_pass = st.text_input("App password Yahoo", type="password")
@@ -29,18 +28,42 @@ parking = st.number_input("Parking (€)", value=0.0)
 hotel = st.number_input("Hôtel (€)", value=0.0)
 autres = st.number_input("Autres frais (€)", value=0.0)
 
-# ---------------- PARSING ----------------
+# ---------------- PARSING STRUCTURÉ ----------------
 def extract(body):
 
-    price = re.search(r'(\d+[.,]\d{2})\s?€', body)
-    date = re.search(r'\d{2}/\d{2}/\d{4}', body)
-    route = re.search(r'[A-Z]{3}\s*-\s*[A-Z]{3}', body)
-
-    return (
-        date.group(0) if date else None,
-        route.group(0) if route else None,
-        float(price.group(1).replace(',', '.')) if price else None
+    # NOM
+    name_match = re.search(
+        r'Information passager.*?\n.*?\n([A-Z\s]+)',
+        body,
+        re.DOTALL
     )
+    name = name_match.group(1).strip() if name_match else None
+
+    # DATE
+    date_match = re.search(
+        r'Vol aller .*? (\d{1,2} \w+ \d{4})',
+        body
+    )
+    date = date_match.group(1) if date_match else None
+
+    # ROUTE
+    route_match = re.search(
+        r'\(([A-Z]{3}) .*?\).*?\(([A-Z]{3})',
+        body
+    )
+    route = f"{route_match.group(1)}-{route_match.group(2)}" if route_match else None
+
+    # PRIX TTC
+    price_match = re.search(
+        r'Montant total TTC\s*:\s*([\d.,]+)',
+        body
+    )
+
+    price = None
+    if price_match:
+        price = float(price_match.group(1).replace(',', '.'))
+
+    return name, date, route, price
 
 # ---------------- FETCH OPTIMISÉ ----------------
 def fetch_flights():
@@ -49,7 +72,6 @@ def fetch_flights():
     mail.login(email_user, email_pass)
     mail.select("inbox")
 
-    # FILTRAGE CÔTÉ SERVEUR (ULTRA IMPORTANT)
     status, messages = mail.search(
         None,
         '(FROM "gpnet@xmedia.airfrance.fr" SUBJECT "Confirmation" SINCE "01-Jan-2025" BEFORE "01-Jan-2026")'
@@ -59,7 +81,6 @@ def fetch_flights():
 
     for i in messages[0].split():
 
-        # TEXTE SEULEMENT (beaucoup plus rapide)
         _, msg_data = mail.fetch(i, "(BODY.PEEK[TEXT])")
 
         try:
@@ -67,17 +88,21 @@ def fetch_flights():
         except:
             continue
 
-        date, route, price = extract(body)
+        name, date, route, price = extract(body)
+
+        # filtre passager
+        if passenger_name and name:
+            if passenger_name.upper() not in name:
+                continue
 
         if price:
-            rows.append([date, route, price])
+            rows.append([name, date, route, price])
 
-    return pd.DataFrame(rows, columns=["Date", "Route", "Price"])
-
+    return pd.DataFrame(rows, columns=["Name", "Date", "Route", "Price"])
 
 # ---------------- CACHE ----------------
 @st.cache_data(ttl=3600)
-def fetch_flights_cached(user, pwd):
+def fetch_flights_cached(user, pwd, pname):
     return fetch_flights()
 
 # ---------------- CALCUL ----------------
@@ -98,12 +123,12 @@ if st.button("Lancer analyse pilote"):
         st.error("Email et mot de passe requis")
     else:
 
-        df = fetch_flights_cached(email_user, email_pass)
+        df = fetch_flights_cached(email_user, email_pass, passenger_name)
 
         vols, cout_vols, frais, total = compute(df)
 
         # ---------------- HEADER ----------------
-        st.subheader(f"👤 Passager : {passenger_name if passenger_name else 'Non renseigné'}")
+        st.subheader(f"👤 Passager : {passenger_name if passenger_name else 'Tous'}")
 
         # ---------------- KPI ----------------
         col1, col2, col3, col4 = st.columns(4)
@@ -135,8 +160,6 @@ if st.button("Lancer analyse pilote"):
             st.plotly_chart(fig2, use_container_width=True)
 
         # ---------------- EXPORT ----------------
-        df.insert(0, "Passenger", passenger_name)
-
         st.download_button(
             "📥 Export CSV",
             df.to_csv(index=False).encode(),
