@@ -1,20 +1,18 @@
 import streamlit as st
 import imaplib
-import email
 import re
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
 
 # ---------------- CONFIG ----------------
 IMAP_SERVER = "imap.mail.yahoo.com"
 
 SENDER = "gpnet@xmedia.airfrance.fr"
-SUBJECT_KEY = "Confirmation de reservation"
+SUBJECT_KEY = "Confirmation"
 
-st.set_page_config(page_title="Pilot Dashboard 3.1", layout="wide")
+st.set_page_config(page_title="Pilot Dashboard 3.2", layout="wide")
 
-st.title("✈️ Pilot Dashboard 3.1")
+st.title("✈️ Pilot Dashboard 3.2")
 
 # ---------------- INPUT ----------------
 passenger_name = st.text_input("Nom du passager")
@@ -44,53 +42,45 @@ def extract(body):
         float(price.group(1).replace(',', '.')) if price else None
     )
 
-# ---------------- FETCH EMAILS ----------------
+# ---------------- FETCH OPTIMISÉ ----------------
 def fetch_flights():
 
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(email_user, email_pass)
     mail.select("inbox")
 
+    # FILTRAGE CÔTÉ SERVEUR (ULTRA IMPORTANT)
     status, messages = mail.search(
         None,
-        '(SINCE "01-Jan-2025" BEFORE "01-Jan-2026")'
+        '(FROM "gpnet@xmedia.airfrance.fr" SUBJECT "Confirmation" SINCE "01-Jan-2025" BEFORE "01-Jan-2026")'
     )
 
     rows = []
 
     for i in messages[0].split():
 
-        _, msg_data = mail.fetch(i, "(RFC822)")
-        msg = email.message_from_bytes(msg_data[0][1])
+        # TEXTE SEULEMENT (beaucoup plus rapide)
+        _, msg_data = mail.fetch(i, "(BODY.PEEK[TEXT])")
 
-        subject = str(msg["subject"])
-        sender = str(msg["from"])
-
-        if SENDER not in sender:
+        try:
+            body = msg_data[0][1].decode(errors="ignore")
+        except:
             continue
-
-        if SUBJECT_KEY.lower() not in subject.lower():
-            continue
-
-        body = ""
-
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    try:
-                        body += part.get_payload(decode=True).decode(errors="ignore")
-                    except:
-                        pass
 
         date, route, price = extract(body)
 
         if price:
             rows.append([date, route, price])
 
-    df = pd.DataFrame(rows, columns=["Date", "Route", "Price"])
-    return df
+    return pd.DataFrame(rows, columns=["Date", "Route", "Price"])
 
-# ---------------- ANALYSIS ----------------
+
+# ---------------- CACHE ----------------
+@st.cache_data(ttl=3600)
+def fetch_flights_cached(user, pwd):
+    return fetch_flights()
+
+# ---------------- CALCUL ----------------
 def compute(df):
 
     vols = len(df)
@@ -108,7 +98,7 @@ if st.button("Lancer analyse pilote"):
         st.error("Email et mot de passe requis")
     else:
 
-        df = fetch_flights()
+        df = fetch_flights_cached(email_user, email_pass)
 
         vols, cout_vols, frais, total = compute(df)
 
@@ -129,24 +119,22 @@ if st.button("Lancer analyse pilote"):
         st.subheader("📋 Détail des vols")
         st.dataframe(df)
 
-        # ---------------- GRAPHIQUE 1 ----------------
+        # ---------------- GRAPHIQUES ----------------
         if not df.empty:
 
-            st.subheader("📊 Coût par vol")
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
-            fig1 = px.bar(df, x="Date", y="Price", title="Répartition des coûts")
+            st.subheader("📊 Coût par vol")
+            fig1 = px.bar(df, x="Date", y="Price")
             st.plotly_chart(fig1, use_container_width=True)
 
-            # ---------------- GRAPHIQUE 2 ----------------
             st.subheader("📈 Évolution mensuelle")
-
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
             monthly = df.groupby(df["Date"].dt.month)["Price"].sum().reset_index()
 
             fig2 = px.line(monthly, x="Date", y="Price", markers=True)
             st.plotly_chart(fig2, use_container_width=True)
 
-        # ---------------- EXPORT CSV ----------------
+        # ---------------- EXPORT ----------------
         df.insert(0, "Passenger", passenger_name)
 
         st.download_button(
@@ -156,10 +144,7 @@ if st.button("Lancer analyse pilote"):
             "text/csv"
         )
 
-        # ---------------- FISCAL SUMMARY ----------------
+        # ---------------- SYNTHÈSE ----------------
         st.subheader("🧾 Synthèse")
 
-        st.write("Base totale :", total, "€")
-
-
-
+        st.write("Base totale :", f"{total:.2f} €")
