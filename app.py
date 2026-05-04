@@ -3,6 +3,8 @@ import imaplib
 import email
 import re
 import pandas as pd
+import plotly.express as px
+from datetime import datetime
 
 # ---------------- CONFIG ----------------
 IMAP_SERVER = "imap.mail.yahoo.com"
@@ -10,36 +12,40 @@ IMAP_SERVER = "imap.mail.yahoo.com"
 SENDER = "gpnet@xmedia.airfrance.fr"
 SUBJECT_KEY = "Confirmation de reservation"
 
-# ---------------- UI ----------------
-st.set_page_config(page_title="Flight Audit 2.0")
+st.set_page_config(page_title="Pilot Dashboard 3.1", layout="wide")
 
-st.title("✈️ Flight Audit 2.0")
+st.title("✈️ Pilot Dashboard 3.1")
 
-email_user = st.text_input("Email Yahoo")
-email_pass = st.text_input("Mot de passe application", type="password")
+# ---------------- INPUT ----------------
+passenger_name = st.text_input("Nom du passager")
+
+email_user = st.text_input("Yahoo email")
+email_pass = st.text_input("App password Yahoo", type="password")
+
+st.divider()
+
+st.subheader("💸 Frais annexes")
+
+peages = st.number_input("Péages (€)", value=0.0)
+parking = st.number_input("Parking (€)", value=0.0)
+hotel = st.number_input("Hôtel (€)", value=0.0)
+autres = st.number_input("Autres frais (€)", value=0.0)
 
 # ---------------- PARSING ----------------
-def extract_data(body):
-    """
-    Extraction robuste basée sur structure Air France
-    """
+def extract(body):
 
-    # Prix TTC
     price = re.search(r'(\d+[.,]\d{2})\s?€', body)
-    price = float(price.group(1).replace(',', '.')) if price else None
-
-    # Date
     date = re.search(r'\d{2}/\d{2}/\d{4}', body)
-    date = date.group(0) if date else None
-
-    # Trajet (format AAA-AAA)
     route = re.search(r'[A-Z]{3}\s*-\s*[A-Z]{3}', body)
-    route = route.group(0) if route else None
 
-    return date, route, price
+    return (
+        date.group(0) if date else None,
+        route.group(0) if route else None,
+        float(price.group(1).replace(',', '.')) if price else None
+    )
 
-# ---------------- FETCH ----------------
-def fetch():
+# ---------------- FETCH EMAILS ----------------
+def fetch_flights():
 
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(email_user, email_pass)
@@ -50,20 +56,16 @@ def fetch():
         '(SINCE "01-Jan-2025" BEFORE "01-Jan-2026")'
     )
 
-    ids = messages[0].split()
-
     rows = []
-    total = 0
 
-    for i in ids:
+    for i in messages[0].split():
 
-        status, msg_data = mail.fetch(i, "(RFC822)")
+        _, msg_data = mail.fetch(i, "(RFC822)")
         msg = email.message_from_bytes(msg_data[0][1])
 
         subject = str(msg["subject"])
         sender = str(msg["from"])
 
-        # FILTRE STRICT
         if SENDER not in sender:
             continue
 
@@ -80,37 +82,84 @@ def fetch():
                     except:
                         pass
 
-        date, route, price = extract_data(body)
+        date, route, price = extract(body)
 
         if price:
             rows.append([date, route, price])
-            total += price
 
     df = pd.DataFrame(rows, columns=["Date", "Route", "Price"])
+    return df
 
-    return df, total
+# ---------------- ANALYSIS ----------------
+def compute(df):
 
+    vols = len(df)
+    cout_vols = df["Price"].sum()
+
+    frais = peages + parking + hotel + autres
+    total = cout_vols + frais
+
+    return vols, cout_vols, frais, total
 
 # ---------------- ACTION ----------------
-if st.button("Lancer analyse 2025"):
+if st.button("Lancer analyse pilote"):
 
     if not email_user or not email_pass:
-        st.error("Champs manquants")
+        st.error("Email et mot de passe requis")
     else:
-        df, total = fetch()
 
-        st.success("Analyse terminée")
+        df = fetch_flights()
 
-        st.write("Total :", total, "€")
-        st.write("Nombre de vols :", len(df))
+        vols, cout_vols, frais, total = compute(df)
 
+        # ---------------- HEADER ----------------
+        st.subheader(f"👤 Passager : {passenger_name if passenger_name else 'Non renseigné'}")
+
+        # ---------------- KPI ----------------
+        col1, col2, col3, col4 = st.columns(4)
+
+        col1.metric("Vols", vols)
+        col2.metric("Coût vols", f"{cout_vols:.2f} €")
+        col3.metric("Frais annexes", f"{frais:.2f} €")
+        col4.metric("Total annuel", f"{total:.2f} €")
+
+        st.divider()
+
+        # ---------------- TABLE ----------------
+        st.subheader("📋 Détail des vols")
         st.dataframe(df)
 
-        csv = df.to_csv(index=False).encode()
+        # ---------------- GRAPHIQUE 1 ----------------
+        if not df.empty:
+
+            st.subheader("📊 Coût par vol")
+
+            fig1 = px.bar(df, x="Date", y="Price", title="Répartition des coûts")
+            st.plotly_chart(fig1, use_container_width=True)
+
+            # ---------------- GRAPHIQUE 2 ----------------
+            st.subheader("📈 Évolution mensuelle")
+
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            monthly = df.groupby(df["Date"].dt.month)["Price"].sum().reset_index()
+
+            fig2 = px.line(monthly, x="Date", y="Price", markers=True)
+            st.plotly_chart(fig2, use_container_width=True)
+
+        # ---------------- EXPORT CSV ----------------
+        df.insert(0, "Passenger", passenger_name)
 
         st.download_button(
-            "Télécharger CSV",
-            csv,
-            "flights_2.0.csv",
+            "📥 Export CSV",
+            df.to_csv(index=False).encode(),
+            "pilot_dashboard.csv",
             "text/csv"
         )
+
+        # ---------------- FISCAL SUMMARY ----------------
+        st.subheader("🧾 Synthèse")
+
+        st.write("Base totale :", total, "€")
+
+
+
